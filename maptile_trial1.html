@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D GeoJSON with Correct Layout</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <input type="date" id="datePicker" style="position: absolute; top: 20px; left: 20px; z-index: 10;">
+    <input type="range" id="timeSlider" min="0" max="23" value="12" style="position: absolute; top: 60px; left: 20px; z-index: 10; width: 200px;">
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/suncalc/1.8.0/suncalc.min.js"></script>
+<script>
+
+// Scene, Camera, Renderer
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true; // Enable shadows
+renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Softer shadows
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.3); // Reduced ambient light to make shadows more visible
+scene.add(ambientLight);
+
+const directionalLight = new THREE.DirectionalLight(0xffffff, 2); // Increased intensity for more defined shadows
+directionalLight.castShadow = true;
+
+// Set shadow properties for better visibility
+directionalLight.shadow.mapSize.width = 10240; // Further increased for better shadow quality
+directionalLight.shadow.mapSize.height = 10240;
+directionalLight.shadow.camera.near = 0.5;
+directionalLight.shadow.camera.far = 1500;
+
+// Adjust shadow camera to better fit the scene
+directionalLight.shadow.camera.left = -700; // Increased to cover more of the scene accurately
+directionalLight.shadow.camera.right = 700;
+directionalLight.shadow.camera.top = 700;
+directionalLight.shadow.camera.bottom = -700;
+
+directionalLight.shadow.bias = -0.0001; // Reduced bias value for better accuracy
+directionalLight.shadow.radius = 4; // Increase blur for softer edges
+
+scene.add(directionalLight);
+scene.add(directionalLight.target);
+
+// Function to update the sun position based on date and time using SunCalc
+function updateSunPosition(date, hour) {
+    const ahmedabadLat = 23.0225;
+    const ahmedabadLng = 72.5714;
+
+    // Use SunCalc to get the position of the sun based on the provided date and time
+    const solarPosition = SunCalc.getPosition(new Date(date.setHours(hour)), ahmedabadLat, ahmedabadLng);
+    
+    const sunAltitude = solarPosition.altitude;
+    const sunAzimuth = solarPosition.azimuth;
+
+    // Set the directional light position based on solar altitude and azimuth
+    const distance = 1000; // Increased distance to ensure proper shadow casting on tall buildings
+    directionalLight.position.set(
+        distance * Math.cos(sunAltitude) * Math.sin(sunAzimuth),
+        distance * Math.sin(sunAltitude),
+        distance * Math.cos(sunAltitude) * Math.cos(sunAzimuth)
+    );
+
+    directionalLight.target.position.set(0, 0, 0);
+    directionalLight.target.updateMatrixWorld();
+}
+
+// Default date and hour setup
+const datePicker = document.getElementById('datePicker');
+const today = new Date();
+datePicker.value = today.toISOString().split('T')[0];
+
+let currentDate = new Date(datePicker.value);
+let currentHour = 12;
+
+// Initial sun position update
+updateSunPosition(currentDate, currentHour);
+
+// Event listener for the date picker
+datePicker.addEventListener("change", function(event) {
+    currentDate = new Date(event.target.value);
+    updateSunPosition(currentDate, currentHour);
+});
+
+// Event listener for the time slider
+document.getElementById("timeSlider").addEventListener("input", function(event) {
+    currentHour = parseInt(event.target.value, 10);
+    updateSunPosition(currentDate, currentHour);
+});
+
+// Controls
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.2;
+
+// Camera Setup
+camera.position.set(0, 300, 300); // Adjusted for better view of the plane and models
+camera.lookAt(0, 0, 0);
+
+// Create a Base Map
+function addPlane(scene) {
+    const baseSize = 1000; // Adjust the size of the base map
+    const baseGeometry = new THREE.PlaneBufferGeometry(baseSize, baseSize);
+    const baseMaterial = new THREE.MeshPhongMaterial({ 
+        color: 0xaaaaaa,
+        side: THREE.DoubleSide
+    });
+    const base = new THREE.Mesh(baseGeometry, baseMaterial);
+    base.rotation.x = -Math.PI / 2;
+    base.position.y = 0; // Ensure the plane is slightly below the buildings
+    base.receiveShadow = true;
+    scene.add(base);
+}
+
+addPlane(scene);
+
+// Helper Function: Convert GeoJSON coordinates to Three.js shapes
+function createPolygonShape(coordinates) {
+    const shape = new THREE.Shape();
+    coordinates[0].forEach(([x, y], index) => {
+        if (index === 0) shape.moveTo(x, y);
+        else shape.lineTo(x, y);
+    });
+    return shape;
+}
+
+// Normalize GeoJSON Coordinates to Fit the Base Map
+function normalizeGeoJSON(geojson, baseSize) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    geojson.features.forEach(feature => {
+        const geometry = feature.geometry;
+        const coordinates = geometry.type === 'Polygon'
+            ? geometry.coordinates
+            : geometry.type === 'MultiPolygon'
+            ? geometry.coordinates.flat(1)
+            : [];
+        coordinates.forEach(ring => {
+            ring.forEach(([x, y]) => {
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                maxX = Math.max(maxX, x);
+                maxY = Math.max(maxY, y);
+            });
+        });
+    });
+
+    const scale = baseSize / Math.max(maxX - minX, maxY - minY);
+    const offsetX = (maxX + minX) / 2;
+    const offsetY = (maxY + minY) / 2;
+
+    geojson.features.forEach(feature => {
+        const geometry = feature.geometry;
+        const normalizeCoordinates = (coordinates) =>
+            coordinates.map(ring =>
+                ring.map(([x, y]) => [(x - offsetX) * scale, (y - offsetY) * scale])
+            );
+
+        if (geometry.type === 'Polygon') {
+            geometry.coordinates = normalizeCoordinates(geometry.coordinates);
+        } else if (geometry.type === 'MultiPolygon') {
+            geometry.coordinates = geometry.coordinates.map(normalizeCoordinates);
+        }
+    });
+}
+
+// Load and Render GeoJSON
+const geojsonUrl = 'building_coordinate.geojson'; // Replace with your GeoJSON file path
+const heightScale = 1; // No scaling, use actual height values from GeoJSON
+
+async function loadGeoJSON(url) {
+    const response = await fetch(url);
+    const geojson = await response.json();
+
+    normalizeGeoJSON(geojson, 1000); // Ensure consistent sizing with the base map
+
+    const group = new THREE.Group(); // Group for rotating the layout
+    geojson.features.forEach(feature => {
+        const geometry = feature.geometry;
+        const properties = feature.properties;
+
+        // Extract height from properties or set default
+        const height = (properties && properties.height ? properties.height : 10) * heightScale;
+
+        if (geometry.type === 'Polygon') {
+            const shape = createPolygonShape(geometry.coordinates);
+            const extrudeSettings = {
+                depth: height,
+                bevelEnabled: false,
+            };
+            const geometry3D = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+
+            const material = new THREE.MeshStandardMaterial({ color: 0x808080 });
+            const mesh = new THREE.Mesh(geometry3D, material);
+
+            mesh.position.set(0, 0, 0); // Set all buildings at the base level
+            mesh.castShadow = true; // Enable casting shadows for buildings
+            mesh.receiveShadow = true; // Buildings can receive shadows from others
+            group.add(mesh);
+        } else if (geometry.type === 'MultiPolygon') {
+            geometry.coordinates.forEach(polygon => {
+                const shape = createPolygonShape(polygon);
+                const extrudeSettings = {
+                    depth: height,
+                    bevelEnabled: false,
+                };
+                const geometry3D = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+
+                const material = new THREE.MeshStandardMaterial({ color: 0x808080 });
+                const mesh = new THREE.Mesh(geometry3D, material);
+
+                mesh.position.set(0, 0, 0); // Set all buildings at the base level
+                mesh.castShadow = true; // Enable casting shadows for buildings
+                mesh.receiveShadow = true; // Buildings can receive shadows from others
+                group.add(mesh);
+            });
+        }
+    });
+
+    // Rotate the layout to fix orientation
+    group.rotation.x = -Math.PI / 2;
+    group.position.y = 0; // Ensure the buildings sit on the base plane
+    scene.add(group);
+}
+
+loadGeoJSON(geojsonUrl);
+
+// Raycaster for detecting building clicks
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+window.addEventListener('click', onMouseClick, false);
+
+function onMouseClick(event) {
+    event.preventDefault();
+
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(scene.children, true);
+
+    if (intersects.length > 0) {
+        // Loop through the intersected objects and find the first building
+        for (let i = 0; i < intersects.length; i++) {
+            const clickedObject = intersects[i].object;
+
+            // Ensure the clicked object is not the base plane
+            if (clickedObject.geometry instanceof THREE.ExtrudeGeometry) {
+                const point = intersects[i].point;
+                const isShadowed = checkIfPointIsShadowed(point);
+                alert(`Coordinates: ${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)}\nShadowed: ${isShadowed}`);
+                break;
+            }
+        }
+    }
+}
+
+// Function to check if a point is in shadow
+function checkIfPointIsShadowed(point) {
+    // Cast a ray from the point towards the direction of light to determine if it is in shadow
+    const directionToLight = directionalLight.position.clone().sub(point).normalize();
+    const shadowRay = new THREE.Raycaster(point, directionToLight);
+    const intersections = shadowRay.intersectObjects(scene.children, true);
+
+    // Point is in shadow if the ray hits an object before reaching the light
+    return intersections.length > 0;
+}
+
+// Render Loop
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+animate();
+
+// Handle Window Resize
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Extruded Buildings from GeoJSON</title>
+    <script src="https://cdn.maptiler.com/maptiler-sdk-js/v2.3.0/maptiler-sdk.umd.js"></script>
+    <link href="https://cdn.maptiler.com/maptiler-sdk-js/v2.3.0/maptiler-sdk.css" rel="stylesheet" />
+    <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <script>
+        // Replace with your MapTiler API Key
+        maptilersdk.config.apiKey = 'G5g2BDlgO8u6JJ4P5DpZ';
+
+        // Initialize the map without built-in 3D buildings
+        var map = new maptilersdk.Map({
+            container: 'map',
+            style: maptilersdk.MapStyle.OUTDOORS, // Using a style that doesn't include 3D buildings
+            center: [72.5714, 23.0225], // Center on Ahmedabad
+            zoom: 15,
+            pitch: 60,
+        });
+
+        // Disable all extruded 3D layers (if any are present)
+        map.on('load', function () {
+            map.getStyle().layers.forEach(function (layer) {
+                if (layer.type === 'fill-extrusion' || layer.id.includes('building')) {
+                    map.setLayoutProperty(layer.id, 'visibility', 'none');
+                }
+            });
+        });
+
+        // THREE.js scene setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
+        const renderer = new THREE.WebGLRenderer({ alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.domElement.style.position = 'absolute';
+        renderer.domElement.style.top = 0;
+        renderer.domElement.style.pointerEvents = 'none';
+        document.body.appendChild(renderer.domElement);
+
+        // Lighting for the 3D scene
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(100, 100, 100).normalize();
+        scene.add(directionalLight);
+
+        // Function to fetch GeoJSON and add 3D models to the map
+        async function loadGeoJSON(filePath) {
+            try {
+                const response = await fetch(filePath);
+                if (!response.ok) `{
+                    throw new Error(Failed to fetch GeoJSON: ${response.statusText});
+                }`
+                const geojsonData = await response.json();
+
+                map.on('load', function () {
+                    // Add a source for the GeoJSON data to visualize the building footprint
+                    map.addSource('geojson-source', {
+                        type: 'geojson',
+                        data: geojsonData,
+                    });
+
+                    // Add an extruded layer for the GeoJSON data to show building footprints
+                    map.addLayer({
+                        id: 'geojson-layer',
+                        type: 'fill-extrusion',
+                        source: 'geojson-source',
+                        paint: {
+                            'fill-extrusion-color': 'white',
+                            'fill-extrusion-height': ['get', 'height'],
+                            'fill-extrusion-base': 0,
+                            'fill-extrusion-opacity': 1
+                        }
+                    });
+
+                    // Add 3D models based on the GeoJSON data
+                    geojsonData.features.forEach((feature) => {
+                        if (feature.geometry.type === 'Polygon') {
+                            addBuilding(feature.geometry.coordinates, feature.properties.height);
+                        } else if (feature.geometry.type === 'MultiPolygon') {
+                            feature.geometry.coordinates.forEach(polygon => {
+                                addBuilding(polygon, feature.properties.height);
+                            });
+                        }
+                    });
+
+                    // Fit the map to the GeoJSON bounds
+                    var bounds = new maptilersdk.LngLatBounds();
+                    geojsonData.features.forEach(function (feature) {
+                        var coordinates = feature.geometry.coordinates;
+                        if (feature.geometry.type === 'Polygon') {
+                            coordinates[0].forEach(function (coord) {
+                                bounds.extend(coord);
+                            });
+                        } else if (feature.geometry.type === 'MultiPolygon') {
+                            coordinates.forEach(function (polygon) {
+                                polygon[0].forEach(function (coord) {
+                                    bounds.extend(coord);
+                                });
+                            });
+                        }
+                    });
+                    map.fitBounds(bounds, { padding: 20 });
+                });
+            } catch (error) {
+                console.error('Error loading GeoJSON:', error);
+            }
+        }
+
+        // Function to create and add building models using Three.js
+        function addBuilding(coordinates, height = 10) {
+            const shape = new THREE.Shape();
+            const mercatorCoordinates = coordinates[0].map(([lng, lat]) =>
+                maptilersdk.MercatorCoordinate.fromLngLat([lng, lat])
+            );
+
+            mercatorCoordinates.forEach((mercatorCoordinate, index) => {
+                if (index === 0) {
+                    shape.moveTo(mercatorCoordinate.x, -mercatorCoordinate.y);
+                } else {
+                    shape.lineTo(mercatorCoordinate.x, -mercatorCoordinate.y);
+                }
+            });
+
+            const extrudeSettings = { depth: height, bevelEnabled: false };
+            const geometry3D = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+            const material = new THREE.MeshStandardMaterial({ color: 0x0077ff, opacity: 0.8, transparent: true });
+            const mesh = new THREE.Mesh(geometry3D, material);
+
+            // Positioning the mesh correctly in the Mercator coordinate system
+            const basePoint = mercatorCoordinates[0];
+            mesh.position.set(basePoint.x, -basePoint.y, 0);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+
+            scene.add(mesh);
+        }
+
+        // Render loop to keep Three.js in sync with MapTiler
+        function animate() {
+            requestAnimationFrame(animate);
+            const mapTransform = map.transform;
+
+            // Set camera transformation based on Mapbox's internal transformation
+            const m = new THREE.Matrix4().fromArray(mapTransform.projMatrix);
+            camera.projectionMatrix = m;
+
+            const center = mapTransform.point;
+            renderer.setSize(mapTransform.width, mapTransform.height);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            // Render the Three.js scene
+            renderer.render(scene, camera);
+        }
+
+        loadGeoJSON('building_with_sequential_ids.geojson'); // Load the GeoJSON file
+        animate();
+    </script>
+</body>
+</html>
